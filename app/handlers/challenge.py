@@ -1,3 +1,4 @@
+from math import ceil
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
@@ -14,16 +15,19 @@ from app.services.challenge_factory import ensure_challenge
 from app.services.rendering import render_challenge
 from app.services.teleutil import safe_edit_card
 from app.keyboards.challenge import challenge_keyboard, save_decision_keyboard
+from app.keyboards.pagination import pagination_keyboard
 from app.keyboards.callbacks import (
     decode,
     VotePayload,
     SavePayload,
     SaveNoteDecisionPayload,
+    PagePayload,
 )
 
 router = Router()
 
 MAX_NOTE_LEN = 500
+PAGE_SIZE = 10
 
 
 # /challenge — выдать карточку
@@ -47,7 +51,7 @@ async def challenge_cmd(message: Message, db: Database):
     )
 
 
-# /my — список сохранённого (первые 10)
+# /my — список сохранённого (пагинация)
 @router.message(Command("my"))
 async def my_cmd(message: Message, db: Database):
     urepo = UserRepo(db)
@@ -57,29 +61,48 @@ async def my_cmd(message: Message, db: Database):
         first_name=message.from_user.first_name or "",
     )
     srepo = SavedRepo(db)
-    rows = await srepo.list_for_user(uid, limit=10)
-    if not rows:
+    total = await srepo.count_for_user(uid)
+    if total == 0:
         await message.answer("Пока пусто. Сохраняй интересные челленджи кнопкой 💾")
         return
 
-    lines = [f"📚 Твои сохранённые (первые {len(rows)}):"]
+    total_pages = max(1, ceil(total / PAGE_SIZE))
+    page = 1
+    offset = (page - 1) * PAGE_SIZE
+    rows = await srepo.page_for_user(uid, PAGE_SIZE, offset)
+
+    lines = [f"📚 Твои сохранённые — страница {page}/{total_pages}:"]
     for cid, title, score in rows:
         lines.append(f"• #{cid} {title}  ({score:+d})")
-    await message.answer("\n".join(lines))
+
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=pagination_keyboard("my", page, total_pages),
+    )
 
 
-# /top — топ по сумме голосов (первые 10)
+# /top — топ по сумме голосов (пагинация)
 @router.message(Command("top"))
 async def top_cmd(message: Message, db: Database):
     crepo = ChallengeRepo(db)
-    rows = await crepo.get_top_by_score(limit=10)
-    if not rows:
+    total = await crepo.count_all()
+    if total == 0:
         await message.answer("Пока нет челленджей.")
         return
-    lines = ["🏆 Топ челленджей:"]
+
+    total_pages = max(1, ceil(total / PAGE_SIZE))
+    page = 1
+    offset = (page - 1) * PAGE_SIZE
+    rows = await crepo.top_by_score_page(PAGE_SIZE, offset)
+
+    lines = [f"🏆 Топ челленджей — страница {page}/{total_pages}:"]
     for cid, title, score in rows:
         lines.append(f"• #{cid} {title}  ({score:+d})")
-    await message.answer("\n".join(lines))
+
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=pagination_keyboard("top", page, total_pages),
+    )
 
 
 # /cancel — выйти из состояния FSM
@@ -103,12 +126,12 @@ async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
 
     kind = parsed["type"]
 
-    # no-op централизованно
+    # no-op
     if kind == "noop":
         await cb.answer()
         return
 
-    # Гарантируем пользователя
+    # гарантируем пользователя
     urepo = UserRepo(db)
     uid = await urepo.get_or_create(
         tg_id=cb.from_user.id,
@@ -156,7 +179,7 @@ async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
         await cb.answer()
         return
 
-    # --- Решение по заметке (Да/Нет) ---
+    # --- Решение по заметке ---
     if kind == "save_decision":
         payload: SaveNoteDecisionPayload = parsed["data"]
         srepo = SavedRepo(db)
@@ -164,7 +187,6 @@ async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
         if payload.decision == "n":
             await srepo.save(uid, payload.cid)
             await cb.answer("Сохранено без заметки ✅")
-            # Попробуем убрать клавиатуру у сообщения-вопроса
             try:
                 if cb.inline_message_id:
                     await cb.bot.edit_message_reply_markup(
@@ -177,10 +199,8 @@ async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
             return
 
         if payload.decision == "y":
-            # Включаем FSM и ждём текст заметки
             await state.set_state(SaveNote.waiting_note)
             await state.update_data(challenge_id=payload.cid)
-            # Меняем текст сообщения-вопроса на инструкцию
             await safe_edit_card(
                 cb.bot,
                 cb,
@@ -209,7 +229,63 @@ async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
         await cb.answer("Новый челлендж 🎲")
         return
 
-    # Для будущих типов (например, пагинации)
+    # --- Пагинация списков ---
+    if kind == "page":
+        payload: PagePayload = parsed["data"]
+        page = max(1, payload.page)
+
+        # my — список сохранённого текущего пользователя
+        if payload.list_id == "my":
+            srepo = SavedRepo(db)
+            total = await srepo.count_for_user(uid)
+            total_pages = max(1, ceil(total / PAGE_SIZE))
+            page = min(page, total_pages)
+            offset = (page - 1) * PAGE_SIZE
+            rows = await srepo.page_for_user(uid, PAGE_SIZE, offset)
+
+            lines = [f"📚 Твои сохранённые — страница {page}/{total_pages}:"]
+            for cid, title, score in rows:
+                lines.append(f"• #{cid} {title}  ({score:+d})")
+
+            try:
+                await cb.message.edit_text(
+                    "\n".join(lines),
+                    reply_markup=pagination_keyboard("my", page, total_pages),
+                )
+            except TelegramBadRequest as e:
+                if "message is not modified" not in str(e).lower():
+                    raise
+            await cb.answer()
+            return
+
+        # top — глобальный топ
+        if payload.list_id == "top":
+            crepo = ChallengeRepo(db)
+            total = await crepo.count_all()
+            total_pages = max(1, ceil(total / PAGE_SIZE))
+            page = min(page, total_pages)
+            offset = (page - 1) * PAGE_SIZE
+            rows = await crepo.top_by_score_page(PAGE_SIZE, offset)
+
+            lines = [f"🏆 Топ челленджей — страница {page}/{total_pages}:"]
+            for cid, title, score in rows:
+                lines.append(f"• #{cid} {title}  ({score:+d})")
+
+            try:
+                await cb.message.edit_text(
+                    "\n".join(lines),
+                    reply_markup=pagination_keyboard("top", page, total_pages),
+                )
+            except TelegramBadRequest as e:
+                if "message is not modified" not in str(e).lower():
+                    raise
+            await cb.answer()
+            return
+
+        await cb.answer("Неизвестный список", show_alert=False)
+        return
+
+    # fallback
     await cb.answer("Неизвестное действие", show_alert=False)
 
 

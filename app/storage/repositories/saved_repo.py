@@ -13,7 +13,6 @@ class SavedRepo:
         )
 
     async def save_with_note(self, user_id: int, challenge_id: int, note: str):
-        # upsert + обновление заметки
         await self.db.execute(
             """
             INSERT INTO saved (user_id, challenge_id, note)
@@ -24,7 +23,12 @@ class SavedRepo:
             (user_id, challenge_id, note),
         )
 
-    async def list_for_user(self, user_id: int, limit: int = 10):
+    async def count_for_user(self, user_id: int) -> int:
+        row = await self.db.fetchone("SELECT COUNT(*) FROM saved WHERE user_id = ?", (user_id,))
+        return int(row[0]) if row and row[0] is not None else 0
+
+    async def page_for_user(self, user_id: int, limit: int, offset: int):
+        # cid, title, score
         rows = await self.db.fetchall(
             """
             SELECT c.id, c.title, COALESCE(SUM(v.value), 0) AS score
@@ -34,8 +38,8 @@ class SavedRepo:
             WHERE s.user_id = ?
             GROUP BY c.id
             ORDER BY s.created_at DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (user_id, limit),
+            (user_id, limit, offset),
         )
         return rows
