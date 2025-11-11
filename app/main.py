@@ -8,7 +8,7 @@ from app.handlers.base import router as base_router
 from app.handlers.inline import router as inline_router
 from app.handlers.challenge import router as challenge_router
 from app.storage.db import Database
-
+from app.middlewares.ratelimit import RateLimitMiddleware
 
 async def main():
     setup_logging()
@@ -19,6 +19,10 @@ async def main():
 
     bot, dp = create_bot()
     dp["db"] = db
+
+    dp.message.middleware(RateLimitMiddleware(window_sec=10, max_actions=5, kinds=("message",)))
+    dp.callback_query.middleware(RateLimitMiddleware(window_sec=10, max_actions=8, kinds=("callback",)))
+
     dp.include_router(base_router)
     dp.include_router(challenge_router)
     dp.include_router(inline_router)
