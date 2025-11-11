@@ -12,13 +12,21 @@ from app.storage.repositories.vote_repo import VoteRepo
 from app.storage.repositories.saved_repo import SavedRepo
 from app.services.challenge_factory import ensure_challenge
 from app.services.rendering import render_challenge
+from app.services.teleutil import safe_edit_card
 from app.keyboards.challenge import challenge_keyboard, save_decision_keyboard
-from app.keyboards.callbacks import decode, VotePayload, SavePayload, SaveNoteDecisionPayload
+from app.keyboards.callbacks import (
+    decode,
+    VotePayload,
+    SavePayload,
+    SaveNoteDecisionPayload,
+)
 
 router = Router()
 
 MAX_NOTE_LEN = 500
 
+
+# /challenge — выдать карточку
 @router.message(Command("challenge"))
 async def challenge_cmd(message: Message, db: Database):
     urepo = UserRepo(db)
@@ -35,9 +43,46 @@ async def challenge_cmd(message: Message, db: Database):
 
     await message.answer(
         render_challenge(cid, title, body, tags, score),
-        reply_markup=challenge_keyboard(cid, score)
+        reply_markup=challenge_keyboard(cid, score),
     )
 
+
+# /my — список сохранённого (первые 10)
+@router.message(Command("my"))
+async def my_cmd(message: Message, db: Database):
+    urepo = UserRepo(db)
+    uid = await urepo.get_or_create(
+        tg_id=message.from_user.id,
+        username=message.from_user.username or "",
+        first_name=message.from_user.first_name or "",
+    )
+    srepo = SavedRepo(db)
+    rows = await srepo.list_for_user(uid, limit=10)
+    if not rows:
+        await message.answer("Пока пусто. Сохраняй интересные челленджи кнопкой 💾")
+        return
+
+    lines = [f"📚 Твои сохранённые (первые {len(rows)}):"]
+    for cid, title, score in rows:
+        lines.append(f"• #{cid} {title}  ({score:+d})")
+    await message.answer("\n".join(lines))
+
+
+# /top — топ по сумме голосов (первые 10)
+@router.message(Command("top"))
+async def top_cmd(message: Message, db: Database):
+    crepo = ChallengeRepo(db)
+    rows = await crepo.get_top_by_score(limit=10)
+    if not rows:
+        await message.answer("Пока нет челленджей.")
+        return
+    lines = ["🏆 Топ челленджей:"]
+    for cid, title, score in rows:
+        lines.append(f"• #{cid} {title}  ({score:+d})")
+    await message.answer("\n".join(lines))
+
+
+# /cancel — выйти из состояния FSM
 @router.message(Command("cancel"))
 async def cancel_cmd(message: Message, state: FSMContext):
     cur = await state.get_state()
@@ -47,6 +92,8 @@ async def cancel_cmd(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Отменено.")
 
+
+# Универсальный обработчик всех callback'ов нашего протокола cf:...
 @router.callback_query(F.data.startswith("cf:"))
 async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
     parsed = decode(cb.data)
@@ -56,11 +103,12 @@ async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
 
     kind = parsed["type"]
 
+    # no-op централизованно
     if kind == "noop":
         await cb.answer()
         return
 
-    # гарантируем пользователя
+    # Гарантируем пользователя
     urepo = UserRepo(db)
     uid = await urepo.get_or_create(
         tg_id=cb.from_user.id,
@@ -68,6 +116,7 @@ async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
         first_name=cb.from_user.first_name or "",
     )
 
+    # --- Голосование ---
     if kind == "vote":
         payload: VotePayload = parsed["data"]
         vrepo = VoteRepo(db)
@@ -88,49 +137,56 @@ async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
         _, title, body, tags = row
         score = await vrepo.get_score(payload.cid)
 
-        try:
-            await cb.message.edit_text(
-                render_challenge(payload.cid, title, body, tags, score),
-                reply_markup=challenge_keyboard(payload.cid, score)
-            )
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e).lower():
-                raise
-
+        await safe_edit_card(
+            cb.bot,
+            cb,
+            render_challenge(payload.cid, title, body, tags, score),
+            challenge_keyboard(payload.cid, score),
+        )
         await cb.answer(action_text)
         return
 
+    # --- Нажали «Сохранить» ---
     if kind == "save":
         payload: SavePayload = parsed["data"]
-        # Показываем вопрос «Добавить заметку?»
         await cb.message.reply(
             f"Добавить заметку к челленджу #{payload.cid}?",
-            reply_markup=save_decision_keyboard(payload.cid)
+            reply_markup=save_decision_keyboard(payload.cid),
         )
         await cb.answer()
         return
 
+    # --- Решение по заметке (Да/Нет) ---
     if kind == "save_decision":
         payload: SaveNoteDecisionPayload = parsed["data"]
         srepo = SavedRepo(db)
+
         if payload.decision == "n":
             await srepo.save(uid, payload.cid)
             await cb.answer("Сохранено без заметки ✅")
-            # можно просто убрать клавиатуру вопроса
+            # Попробуем убрать клавиатуру у сообщения-вопроса
             try:
-                await cb.message.edit_reply_markup(reply_markup=None)
+                if cb.inline_message_id:
+                    await cb.bot.edit_message_reply_markup(
+                        inline_message_id=cb.inline_message_id, reply_markup=None
+                    )
+                else:
+                    await cb.message.edit_reply_markup(reply_markup=None)
             except TelegramBadRequest:
                 pass
             return
 
         if payload.decision == "y":
-            # включаем FSM и ждём текст
+            # Включаем FSM и ждём текст заметки
             await state.set_state(SaveNote.waiting_note)
             await state.update_data(challenge_id=payload.cid)
-            # подсказка
-            await cb.message.edit_text(
+            # Меняем текст сообщения-вопроса на инструкцию
+            await safe_edit_card(
+                cb.bot,
+                cb,
                 f"Напиши заметку для челленджа #{payload.cid} (до {MAX_NOTE_LEN} символов).\n"
-                f"Чтобы отменить — /cancel"
+                f"Чтобы отменить — /cancel",
+                None,
             )
             await cb.answer()
             return
@@ -138,25 +194,26 @@ async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
         await cb.answer("Некорректное решение", show_alert=False)
         return
 
+    # --- Новый челлендж ---
     if kind == "new":
         crepo = ChallengeRepo(db)
         vrepo = VoteRepo(db)
         cid, title, body, tags = await ensure_challenge(crepo)
         score = await vrepo.get_score(cid)
-        try:
-            await cb.message.edit_text(
-                render_challenge(cid, title, body, tags, score),
-                reply_markup=challenge_keyboard(cid, score)
-            )
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e).lower():
-                raise
+        await safe_edit_card(
+            cb.bot,
+            cb,
+            render_challenge(cid, title, body, tags, score),
+            challenge_keyboard(cid, score),
+        )
         await cb.answer("Новый челлендж 🎲")
         return
 
+    # Для будущих типов (например, пагинации)
     await cb.answer("Неизвестное действие", show_alert=False)
 
-# --- при активном состоянии ждём текст заметки ---
+
+# При активном состоянии ждём текст заметки
 @router.message(SaveNote.waiting_note)
 async def save_note_receive(message: Message, db: Database, state: FSMContext):
     data = await state.get_data()
