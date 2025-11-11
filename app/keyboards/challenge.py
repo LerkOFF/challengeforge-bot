@@ -4,7 +4,8 @@ from app.keyboards.callbacks import (
     encode_save,
     encode_new,
     encode_noop,
-    encode_save_decision,   # важно: есть в callbacks.py
+    encode_save_decision,
+    encode_note_list,
 )
 
 def challenge_keyboard(challenge_id: int, score: int) -> InlineKeyboardMarkup:
@@ -12,7 +13,7 @@ def challenge_keyboard(challenge_id: int, score: int) -> InlineKeyboardMarkup:
     Основная клавиатура под карточкой челленджа:
     👍  [+score]  👎
     💾 Сохранить | 🎲 Ещё
-    📤 Поделиться (открывает inline-режим с префиксом cid:<id>)
+    📝 Заметки | 📤 Поделиться
     """
     row1 = [
         InlineKeyboardButton(text="👍", callback_data=encode_vote(challenge_id, 1)),
@@ -24,7 +25,8 @@ def challenge_keyboard(challenge_id: int, score: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🎲 Ещё", callback_data=encode_new()),
     ]
     row3 = [
-        InlineKeyboardButton(text="📤 Поделиться", switch_inline_query=f"cid:{challenge_id}")
+        InlineKeyboardButton(text="📝 Заметки", callback_data=encode_note_list()),
+        InlineKeyboardButton(text="📤 Поделиться", switch_inline_query=f"cid:{challenge_id}"),
     ]
     return InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3])
 

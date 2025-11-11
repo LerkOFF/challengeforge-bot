@@ -22,6 +22,7 @@ from app.keyboards.callbacks import (
     SavePayload,
     SaveNoteDecisionPayload,
     PagePayload,
+    NotePayload,
 )
 
 router = Router()
@@ -79,6 +80,7 @@ async def my_cmd(message: Message, db: Database):
         "\n".join(lines),
         reply_markup=pagination_keyboard("my", page, total_pages),
     )
+    await message.answer("📝 Хочешь увидеть заметки по сохранённым челленджам? Введи команду /notes")
 
 
 # /top — топ по сумме голосов (пагинация)
@@ -103,6 +105,32 @@ async def top_cmd(message: Message, db: Database):
         "\n".join(lines),
         reply_markup=pagination_keyboard("top", page, total_pages),
     )
+
+
+# /notes — список заметок пользователя
+@router.message(Command("notes"))
+async def notes_cmd(message: Message, db: Database):
+    urepo = UserRepo(db)
+    uid = await urepo.get_or_create(
+        tg_id=message.from_user.id,
+        username=message.from_user.username or "",
+        first_name=message.from_user.first_name or "",
+    )
+
+    srepo = SavedRepo(db)
+    rows = await srepo.list_notes_for_user(uid, limit=20)
+
+    if not rows:
+        await message.answer("У тебя ещё нет заметок 📭")
+        return
+
+    lines = ["📝 Твои заметки:"]
+    for cid, title, note in rows:
+        # небольшой трим, чтобы сообщение не разрасталось
+        short = note if len(note) <= 300 else note[:300] + "…"
+        lines.append(f"• #{cid} {title}\n   — {short}")
+
+    await message.answer("\n".join(lines))
 
 
 # /cancel — выйти из состояния FSM
@@ -234,7 +262,6 @@ async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
         payload: PagePayload = parsed["data"]
         page = max(1, payload.page)
 
-        # my — список сохранённого текущего пользователя
         if payload.list_id == "my":
             srepo = SavedRepo(db)
             total = await srepo.count_for_user(uid)
@@ -251,6 +278,7 @@ async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
                 await cb.message.edit_text(
                     "\n".join(lines),
                     reply_markup=pagination_keyboard("my", page, total_pages),
+                    parse_mode="HTML",
                 )
             except TelegramBadRequest as e:
                 if "message is not modified" not in str(e).lower():
@@ -258,7 +286,6 @@ async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
             await cb.answer()
             return
 
-        # top — глобальный топ
         if payload.list_id == "top":
             crepo = ChallengeRepo(db)
             total = await crepo.count_all()
@@ -275,6 +302,7 @@ async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
                 await cb.message.edit_text(
                     "\n".join(lines),
                     reply_markup=pagination_keyboard("top", page, total_pages),
+                    parse_mode="HTML",
                 )
             except TelegramBadRequest as e:
                 if "message is not modified" not in str(e).lower():
@@ -283,6 +311,33 @@ async def generic_callback(cb: CallbackQuery, db: Database, state: FSMContext):
             return
 
         await cb.answer("Неизвестный список", show_alert=False)
+        return
+
+    # --- Просмотр заметки по конкретному челленджу (на будущее, если добавишь кнопку encode_note(cid)) ---
+    if kind == "note":
+        payload: NotePayload = parsed["data"]
+        srepo = SavedRepo(db)
+        note = await srepo.get_note(uid, payload.cid)
+        if not note:
+            await cb.answer("Нет заметки", show_alert=False)
+            return
+        await cb.message.answer(f"📝 Заметка к челленджу #{payload.cid}:\n\n{note}")
+        await cb.answer()
+        return
+
+    # --- Просмотр списка заметок из карточки («📝 Заметки») ---
+    if kind == "note_list":
+        srepo = SavedRepo(db)
+        rows = await srepo.list_notes_for_user(uid, limit=20)
+        if not rows:
+            await cb.answer("Нет заметок", show_alert=False)
+            return
+        lines = ["📝 Твои заметки:"]
+        for cid, title, note in rows:
+            short = note if len(note) <= 300 else note[:300] + "…"
+            lines.append(f"• #{cid} {title}\n   — {short}")
+        await cb.message.answer("\n".join(lines))
+        await cb.answer()
         return
 
     # fallback
