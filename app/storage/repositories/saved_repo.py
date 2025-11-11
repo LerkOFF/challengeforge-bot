@@ -12,6 +12,18 @@ class SavedRepo:
             (user_id, challenge_id),
         )
 
+    async def save_with_note(self, user_id: int, challenge_id: int, note: str):
+        # upsert + обновление заметки
+        await self.db.execute(
+            """
+            INSERT INTO saved (user_id, challenge_id, note)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id, challenge_id)
+            DO UPDATE SET note = excluded.note
+            """,
+            (user_id, challenge_id, note),
+        )
+
     async def list_for_user(self, user_id: int, limit: int = 10):
         rows = await self.db.fetchall(
             """

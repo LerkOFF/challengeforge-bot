@@ -133,3 +133,69 @@ def decode(data: str):
         return {"type": "page", "data": PagePayload(list_id=list_id, page=page)}
 
     return None
+
+@dataclass
+class SaveNoteDecisionPayload:
+    cid: int
+    decision: str  # 'y' | 'n'
+
+def encode_save_decision(challenge_id: int, decision: str) -> str:
+    # cf:1:sn:<cid>:<y|n>[:sig]
+    return _pack([PREFIX, VERSION, "sn", str(challenge_id), decision])
+
+SN_RE = re.compile(r"^cf:1:sn:(-?\d+):(y|n)$")
+
+def decode(data: str):
+    if data == "cf:noop":
+        return {"type": "noop"}
+
+    if Config.CALLBACK_SECRET:
+        try:
+            head, sig = data.rsplit(":", 1)
+        except ValueError:
+            return None
+        if not _verify(data):
+            return None
+        payload = head
+    else:
+        payload = data
+
+    # vote
+    m = VOTE_RE.match(payload)
+    if m:
+        cid = int(m.group(1)); val = int(m.group(2))
+        if not (-MAX_ID <= cid <= MAX_ID):
+            return None
+        return {"type": "vote", "data": VotePayload(cid=cid, val=val)}
+
+    # save
+    m = SAVE_RE.match(payload)
+    if m:
+        cid = int(m.group(1))
+        if not (-MAX_ID <= cid <= MAX_ID):
+            return None
+        return {"type": "save", "data": SavePayload(cid=cid)}
+
+    # save note decision (new)
+    m = SN_RE.match(payload)
+    if m:
+        cid = int(m.group(1)); decision = m.group(2)
+        if not (-MAX_ID <= cid <= MAX_ID):
+            return None
+        return {"type": "save_decision", "data": SaveNoteDecisionPayload(cid=cid, decision=decision)}
+
+    # new
+    if NEW_RE.match(payload):
+        return {"type": "new"}
+
+    # page
+    m = PAGE_RE.match(payload)
+    if m:
+        list_id = m.group(1); page = int(m.group(2))
+        if page < 1 or page > MAX_PAGE:
+            return None
+        if list_id not in ("my", "top"):
+            return None
+        return {"type": "page", "data": PagePayload(list_id=list_id, page=page)}
+
+    return None

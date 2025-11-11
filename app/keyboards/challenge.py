@@ -1,5 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from app.keyboards.callbacks import encode_vote, encode_save, encode_new, encode_noop
+from app.keyboards.callbacks import (
+    encode_vote, encode_save, encode_new, encode_noop, encode_save_decision
+)
 
 def challenge_keyboard(challenge_id: int, score: int) -> InlineKeyboardMarkup:
     row1 = [
@@ -12,3 +14,10 @@ def challenge_keyboard(challenge_id: int, score: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🎲 Ещё", callback_data=encode_new()),
     ]
     return InlineKeyboardMarkup(inline_keyboard=[row1, row2])
+
+def save_decision_keyboard(challenge_id: int) -> InlineKeyboardMarkup:
+    row = [
+        InlineKeyboardButton(text="Да, добавить", callback_data=encode_save_decision(challenge_id, "y")),
+        InlineKeyboardButton(text="Нет", callback_data=encode_save_decision(challenge_id, "n")),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[row])
